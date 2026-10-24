@@ -1,0 +1,17 @@
+[project]
+name = "idotmatrix-companion"
+version = "0.1.0"
+description = "Standalone companion web app for iDotMatrix displays with a predefined logo library and full-screen pixel countdown timer"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "idotmatrix-api-client>=0.2.0",
+    "pillow>=12.2.0",
+]
+
+[project.scripts]
+idotmatrix-companion = "app:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
