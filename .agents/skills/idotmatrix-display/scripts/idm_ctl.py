@@ -155,7 +155,8 @@ async def direct_show_picture(mac: str, file_path: Path) -> dict[str, Any]:
     )
     await client.connect()
     try:
-        await client.image.show_image_file(
+        await client.image.set_mode(ImageMode.EnableDIY)
+        await client.image.upload_image_file(
             file_path=file_path,
             background_color=(0, 0, 0),
         )

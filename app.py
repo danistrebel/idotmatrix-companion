@@ -62,6 +62,13 @@ class CompanionController:
         self.countdown_cleared_pixels: int = 0
         self.countdown_color: str = "#00ff00"
 
+        # Picture cycle (slideshow) state
+        self._cycle_task: asyncio.Task[None] | None = None
+        self.cycle_running: bool = False
+        self.cycle_pictures: list[str] = []
+        self.cycle_delay_seconds: float = 5.0
+        self.cycle_current_index: int = 0
+
     @property
     def is_connected(self) -> bool:
         return (
@@ -99,6 +106,7 @@ class CompanionController:
 
     async def disconnect(self) -> None:
         await self.stop_countdown()
+        await self.stop_cycle()
         if self.client is not None:
             await self.client.disconnect()
         self.active_mode = "idle"
@@ -117,12 +125,14 @@ class CompanionController:
             raise FileNotFoundError(f"Picture '{filename}' not found in library")
 
         await self.stop_countdown()
+        await self.stop_cycle()
         self.busy = True
         self.status_message = f"Sending {filename} to display..."
         try:
             async with self._ble_lock:
                 client = await self.ensure_connected()
-                await client.image.show_image_file(
+                await client.image.set_mode(ImageMode.EnableDIY)
+                await client.image.upload_image_file(
                     file_path=file_path,
                     background_color=(0, 0, 0),
                 )
@@ -132,11 +142,94 @@ class CompanionController:
         finally:
             self.busy = False
 
+    async def start_cycle(self, pictures: list[str], delay_seconds: float = 5.0) -> None:
+        if delay_seconds < 0.5:
+            raise ValueError("Cycle delay must be at least 0.5 seconds")
+
+        file_paths: list[Path] = []
+        for pic in pictures:
+            if not pic:
+                continue
+            fp = (LIBRARY_DIR / Path(pic).name).resolve()
+            if not fp.exists() or fp.parent != LIBRARY_DIR.resolve():
+                raise FileNotFoundError(f"Picture '{pic}' not found in library")
+            file_paths.append(fp)
+
+        if len(file_paths) < 2:
+            raise ValueError("Please select at least 2 pictures to cycle through")
+
+        await self.stop_countdown()
+        await self.stop_cycle()
+
+        self.cycle_pictures = [fp.name for fp in file_paths]
+        self.cycle_delay_seconds = float(delay_seconds)
+        self.cycle_current_index = 0
+        self.cycle_running = True
+        self.active_mode = "cycle"
+        self.active_picture = self.cycle_pictures[0]
+
+        self._cycle_task = asyncio.create_task(
+            self._run_picture_cycle(file_paths=file_paths, delay_seconds=float(delay_seconds))
+        )
+
+    async def stop_cycle(self) -> None:
+        if self._cycle_task is not None and not self._cycle_task.done():
+            self._cycle_task.cancel()
+            try:
+                await self._cycle_task
+            except asyncio.CancelledError:
+                pass
+        self._cycle_task = None
+        if self.cycle_running:
+            self.cycle_running = False
+            self.busy = False
+            if self.active_mode == "cycle":
+                self.active_mode = "picture" if self.active_picture else "idle"
+            self.status_message = "Picture cycling stopped"
+
+    async def _run_picture_cycle(self, file_paths: list[Path], delay_seconds: float) -> None:
+        try:
+            total = len(file_paths)
+            idx = 0
+            while True:
+                file_path = file_paths[idx]
+                self.cycle_current_index = idx
+                self.busy = True
+                self.status_message = f"Cycling ({idx + 1}/{total}): Sending {file_path.name}..."
+                try:
+                    async with self._ble_lock:
+                        client = await self.ensure_connected()
+                        await client.image.set_mode(ImageMode.EnableDIY)
+                        await client.image.upload_image_file(
+                            file_path=file_path,
+                            background_color=(0, 0, 0),
+                        )
+                    self.active_mode = "cycle"
+                    self.active_picture = file_path.name
+                    self.status_message = (
+                        f"Cycling ({idx + 1}/{total}): Showing {file_path.name} "
+                        f"(every {delay_seconds:g}s)"
+                    )
+                finally:
+                    self.busy = False
+
+                await asyncio.sleep(delay_seconds)
+                idx = (idx + 1) % total
+        except asyncio.CancelledError:
+            logger.info("Picture cycle cancelled")
+            raise
+        except Exception as exc:
+            logger.exception("Picture cycle failed")
+            self.cycle_running = False
+            self.busy = False
+            self.status_message = f"Cycle error: {exc}"
+
     async def start_countdown(self, total_seconds: float, color_hex: str = "#00ff00") -> None:
         if total_seconds <= 0:
             raise ValueError("Countdown duration must be greater than 0 seconds")
 
         await self.stop_countdown()
+        await self.stop_cycle()
         color_rgb = color_utils.parse_color_rgb(color_hex)
         self.countdown_color = color_hex
         self.countdown_total_seconds = float(total_seconds)
@@ -258,6 +351,13 @@ class CompanionController:
                 "percent": round(percent, 1),
                 "color": self.countdown_color,
             },
+            "cycle": {
+                "running": self.cycle_running,
+                "pictures": self.cycle_pictures,
+                "delay_seconds": self.cycle_delay_seconds,
+                "current_index": self.cycle_current_index,
+                "current_picture": self.active_picture if self.cycle_running else None,
+            },
             "library": ensure_library(),
         }
 
@@ -361,16 +461,64 @@ INDEX_HTML = """<!DOCTYPE html>
       background: #090d11;
       border: 1px solid var(--border);
       border-radius: 10px;
-      padding: 14px;
+      padding: 12px 14px 14px;
       display: flex;
       flex-direction: column;
       align-items: center;
       gap: 10px;
-      transition: border-color 0.15s, transform 0.15s;
+      transition: border-color 0.15s, box-shadow 0.15s, transform 0.15s;
+      position: relative;
+    }
+    .pic-card.selected {
+      border-color: rgba(66, 133, 244, 0.75);
+      background: #0d1522;
     }
     .pic-card.active {
-      border-color: var(--accent);
-      box-shadow: 0 0 0 1px var(--accent);
+      border-color: var(--green);
+      box-shadow: 0 0 0 1px var(--green);
+    }
+    .pic-card-top {
+      width: 100%;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      font-size: 0.78rem;
+      color: var(--muted);
+      cursor: pointer;
+      user-select: none;
+    }
+    .pic-select-label {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      cursor: pointer;
+      font-weight: 500;
+      color: var(--text);
+    }
+    .pic-select-label input[type="checkbox"] {
+      width: 15px;
+      height: 15px;
+      accent-color: var(--accent);
+      cursor: pointer;
+      margin: 0;
+    }
+    .pic-order-badge {
+      font-size: 0.72rem;
+      font-weight: 700;
+      padding: 2px 7px;
+      border-radius: 999px;
+      background: rgba(66, 133, 244, 0.22);
+      color: #79b8ff;
+      border: 1px solid rgba(66, 133, 244, 0.45);
+    }
+    .pic-active-badge {
+      font-size: 0.72rem;
+      font-weight: 700;
+      padding: 2px 7px;
+      border-radius: 999px;
+      background: rgba(52, 168, 83, 0.2);
+      color: #56d364;
+      border: 1px solid rgba(52, 168, 83, 0.45);
     }
     .pic-preview {
       width: 112px;
@@ -382,6 +530,7 @@ INDEX_HTML = """<!DOCTYPE html>
       align-items: center;
       justify-content: center;
       overflow: hidden;
+      cursor: pointer;
     }
     .pic-preview img {
       width: 100%;
@@ -394,6 +543,39 @@ INDEX_HTML = """<!DOCTYPE html>
       font-size: 0.95rem;
       text-align: center;
     }
+    .cycle-panel {
+      margin-top: 16px;
+      padding: 14px 16px;
+      border-radius: 10px;
+      background: #090d11;
+      border: 1px solid var(--border);
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+    }
+    .cycle-left {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+    .cycle-right {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+    .cycle-status-text {
+      font-size: 0.85rem;
+      color: var(--muted);
+      margin-left: 4px;
+    }
+    .cycle-status-text.running {
+      color: #56d364;
+      font-weight: 600;
+    }
     button {
       cursor: pointer;
       font: inherit;
@@ -405,6 +587,10 @@ INDEX_HTML = """<!DOCTYPE html>
       background: #21262d;
       color: var(--text);
       transition: background 0.15s, opacity 0.15s;
+    }
+    button.sm {
+      font-size: 0.8rem;
+      padding: 5px 10px;
     }
     button:hover:not(:disabled) {
       background: #30363d;
@@ -448,6 +634,13 @@ INDEX_HTML = """<!DOCTYPE html>
       flex-direction: column;
       gap: 4px;
       font-size: 0.82rem;
+      color: var(--muted);
+    }
+    .inline-field {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 0.84rem;
       color: var(--muted);
     }
     input[type="number"], input[type="text"] {
@@ -529,8 +722,31 @@ INDEX_HTML = """<!DOCTYPE html>
 
     <section class="card">
       <h2>Picture Library (Black Screen)</h2>
-      <p class="sub">Click a logo to display it immediately on your iDotMatrix panel with smooth anti-aliasing.</p>
+      <p class="sub">
+        Click <strong>Show on Display</strong> for a single picture, or check multiple pictures below to cycle through them automatically.
+      </p>
       <div id="libraryGrid" class="library-grid"></div>
+
+      <div class="cycle-panel">
+        <div class="cycle-left">
+          <button class="sm" onclick="selectAllPictures()">Select All</button>
+          <button class="sm" onclick="clearSelectedPictures()">Clear</button>
+          <span id="cycleStatusLabel" class="cycle-status-text">0 selected (pick at least 2 to cycle)</span>
+        </div>
+        <div class="cycle-right">
+          <label class="inline-field" for="cycleDelay">
+            Delay (sec)
+            <input id="cycleDelay" type="number" min="0.5" max="3600" step="0.5" value="5" style="width:78px;" />
+          </label>
+          <button id="startCycleBtn" class="success" onclick="startCycle()" disabled>
+            Cycle Selected
+          </button>
+          <button id="stopCycleBtn" class="danger" onclick="stopCycle()" disabled>
+            Stop Cycling
+          </button>
+        </div>
+      </div>
+
       <div class="upload-row">
         <span>Add custom image to library:</span>
         <div style="display:flex; gap:8px; align-items:center;">
@@ -584,6 +800,11 @@ INDEX_HTML = """<!DOCTYPE html>
 
   <script>
     let currentLibraryJson = "";
+    let cachedLibrary = [];
+    let selectedPictures = [];
+    let latestActivePic = null;
+    let latestCycleState = { running: false, pictures: [], delay_seconds: 5, current_index: 0 };
+    let syncedInitialCycle = false;
 
     function formatTime(sec) {
       sec = Math.max(0, Math.round(sec));
@@ -608,6 +829,77 @@ INDEX_HTML = """<!DOCTYPE html>
 
     async function showPicture(id) {
       await apiPost("/api/show-picture", { id });
+    }
+
+    function toggleSelectPicture(filename) {
+      const idx = selectedPictures.indexOf(filename);
+      if (idx >= 0) {
+        selectedPictures.splice(idx, 1);
+      } else {
+        selectedPictures.push(filename);
+      }
+      renderLibrary(cachedLibrary, latestActivePic);
+      updateCycleControls();
+    }
+
+    function selectAllPictures() {
+      selectedPictures = cachedLibrary.map(item => item.filename);
+      renderLibrary(cachedLibrary, latestActivePic);
+      updateCycleControls();
+    }
+
+    function clearSelectedPictures() {
+      selectedPictures = [];
+      renderLibrary(cachedLibrary, latestActivePic);
+      updateCycleControls();
+    }
+
+    function updateCycleControls() {
+      const count = selectedPictures.length;
+      const startBtn = document.getElementById("startCycleBtn");
+      const stopBtn = document.getElementById("stopCycleBtn");
+      const statusLabel = document.getElementById("cycleStatusLabel");
+
+      startBtn.disabled = count < 2;
+      stopBtn.disabled = !latestCycleState.running;
+
+      if (latestCycleState.running) {
+        const total = (latestCycleState.pictures || []).length;
+        const idx = (latestCycleState.current_index || 0) + 1;
+        const picName = latestCycleState.current_picture || "";
+        statusLabel.textContent = `Cycling ${idx}/${total}: ${picName} (every ${latestCycleState.delay_seconds}s) • ${count} selected`;
+        statusLabel.classList.add("running");
+      } else {
+        statusLabel.classList.remove("running");
+        if (count === 0) {
+          statusLabel.textContent = "0 selected (pick at least 2 to cycle)";
+        } else if (count === 1) {
+          statusLabel.textContent = "1 selected (pick at least 1 more to cycle)";
+        } else {
+          statusLabel.textContent = `${count} pictures selected for cycling`;
+        }
+      }
+    }
+
+    async function startCycle() {
+      if (selectedPictures.length < 2) {
+        alert("Please select at least 2 pictures from the library to cycle through.");
+        return;
+      }
+      const delayInput = document.getElementById("cycleDelay");
+      const delaySeconds = parseFloat(delayInput.value || "5");
+      if (isNaN(delaySeconds) || delaySeconds < 0.5) {
+        alert("Please enter a delay of at least 0.5 seconds.");
+        return;
+      }
+      await apiPost("/api/cycle/start", {
+        pictures: selectedPictures,
+        delay_seconds: delaySeconds,
+      });
+    }
+
+    async function stopCycle() {
+      await apiPost("/api/cycle/stop");
     }
 
     function setPreset(mins, secs) {
@@ -661,13 +953,36 @@ INDEX_HTML = """<!DOCTYPE html>
     }
 
     function renderLibrary(library, activePic) {
-      const key = JSON.stringify({ library, activePic });
+      cachedLibrary = library;
+      latestActivePic = activePic;
+      const validFiles = new Set(library.map(item => item.filename));
+      selectedPictures = selectedPictures.filter(fn => validFiles.has(fn));
+
+      const key = JSON.stringify({ library, activePic, selectedPictures });
       if (key === currentLibraryJson) return;
       currentLibraryJson = key;
       const grid = document.getElementById("libraryGrid");
-      grid.innerHTML = library.map(item => `
-        <div class="pic-card ${activePic === item.filename ? 'active' : ''}">
-          <div class="pic-preview">
+      grid.innerHTML = library.map(item => {
+        const selIdx = selectedPictures.indexOf(item.filename);
+        const isSelected = selIdx >= 0;
+        const isActive = activePic === item.filename;
+        return `
+        <div class="pic-card ${isSelected ? 'selected' : ''} ${isActive ? 'active' : ''}">
+          <div class="pic-card-top" onclick="toggleSelectPicture('${item.filename}')">
+            <label class="pic-select-label" onclick="event.stopPropagation()">
+              <input
+                type="checkbox"
+                ${isSelected ? 'checked' : ''}
+                onchange="toggleSelectPicture('${item.filename}')"
+              />
+              <span>Select</span>
+            </label>
+            <div style="display:flex; gap:4px; align-items:center;">
+              ${isSelected ? `<span class="pic-order-badge">#${selIdx + 1}</span>` : ''}
+              ${isActive ? `<span class="pic-active-badge">Active</span>` : ''}
+            </div>
+          </div>
+          <div class="pic-preview" onclick="toggleSelectPicture('${item.filename}')" title="Click to select/deselect for cycling">
             <img src="/library/${encodeURIComponent(item.filename)}?v=${item.mtime || 1}" alt="${item.title}" />
           </div>
           <div class="pic-title">${item.title}</div>
@@ -675,7 +990,8 @@ INDEX_HTML = """<!DOCTYPE html>
             Show on Display
           </button>
         </div>
-      `).join("");
+        `;
+      }).join("");
     }
 
     async function refreshStatus() {
@@ -696,7 +1012,19 @@ INDEX_HTML = """<!DOCTYPE html>
         }
 
         document.getElementById("statusText").textContent = st.status_message;
-        renderLibrary(st.library || [], st.active_mode === "picture" ? st.active_picture : null);
+
+        latestCycleState = st.cycle || { running: false, pictures: [], delay_seconds: 5, current_index: 0 };
+        if (!syncedInitialCycle && latestCycleState.running && latestCycleState.pictures && latestCycleState.pictures.length >= 2) {
+          selectedPictures = [...latestCycleState.pictures];
+          document.getElementById("cycleDelay").value = latestCycleState.delay_seconds || 5;
+          syncedInitialCycle = true;
+        } else if (st.library) {
+          syncedInitialCycle = true;
+        }
+
+        const activePic = (st.active_mode === "picture" || st.active_mode === "cycle") ? st.active_picture : null;
+        renderLibrary(st.library || [], activePic);
+        updateCycleControls();
 
         const cd = st.countdown;
         document.getElementById("stopCdBtn").disabled = !cd.running;
@@ -808,6 +1136,18 @@ class WebServer:
                 if path == "/api/show-picture":
                     pic_id = data.get("id", "")
                     await self.controller.show_picture(pic_id)
+                    return self._json_response("200 OK", self.controller.get_state())
+
+                if path == "/api/cycle/start":
+                    pictures = data.get("pictures", [])
+                    if not isinstance(pictures, list):
+                        raise ValueError("'pictures' must be a list of filenames")
+                    delay_seconds = float(data.get("delay_seconds", 5.0))
+                    await self.controller.start_cycle(pictures=pictures, delay_seconds=delay_seconds)
+                    return self._json_response("200 OK", self.controller.get_state())
+
+                if path == "/api/cycle/stop":
+                    await self.controller.stop_cycle()
                     return self._json_response("200 OK", self.controller.get_state())
 
                 if path == "/api/countdown/start":

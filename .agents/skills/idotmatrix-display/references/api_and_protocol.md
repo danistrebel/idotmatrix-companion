@@ -6,8 +6,10 @@ The standalone companion app in [`app.py`](../../../../app.py) exposes a local J
 
 | Method | Endpoint | Request Body (JSON) | Description |
 | :--- | :--- | :--- | :--- |
-| `GET` | `/api/status` | — | Returns connection status, active mode (`idle`, `picture`, `countdown`), active picture, library items, and live countdown telemetry. |
-| `POST` | `/api/show-picture` | `{"id": "antigravity.png"}` | Stops any running countdown, switches to DIY image upload mode, and displays the requested library image on a pure black `(0, 0, 0)` background. |
+| `GET` | `/api/status` | — | Returns connection status, active mode (`idle`, `picture`, `cycle`, `countdown`), active picture, library items, cycle state, and live countdown telemetry. |
+| `POST` | `/api/show-picture` | `{"id": "antigravity.png"}` | Stops any running countdown or cycle, switches to DIY image upload mode, and displays the requested library image on a pure black `(0, 0, 0)` background. |
+| `POST` | `/api/cycle/start` | `{"pictures": ["antigravity.png", "google-cloud.png"], "delay_seconds": 5}` | Cycles continuously through the selected library pictures in order with the configured delay in seconds. |
+| `POST` | `/api/cycle/stop` | `{}` | Stops the running picture cycle task immediately. |
 | `POST` | `/api/upload` | `{"filename": "custom.png", "data_base64": "..."}` | Composites an uploaded image onto a pure black `(0, 0, 0)` background and saves it into `library/`. |
 | `POST` | `/api/countdown/start` | `{"total_seconds": 60, "color": "#00ff00"}` | Starts the full-screen `1,024`-pixel countdown timer in a background `asyncio.Task`. |
 | `POST` | `/api/countdown/stop` | `{}` | Cancels the running countdown task immediately. |
@@ -31,10 +33,10 @@ Initialized by [`init_library.py`](../../../../init_library.py):
 
 ## 3. BLE Protocol & Rendering Rules (`idotmatrix-api-client`)
 
-- **Why `ImageModule.show_image_file` is used for Logos**:
-  - `show_image_file(file_path=..., background_color=(0, 0, 0))` uses `Image.Resampling.LANCZOS` (`resize_and_pad`), which produces smooth anti-aliased edge pixels on the `32x32` LED matrix.
+- **Why `ImageMode.EnableDIY` + `ImageModule.upload_image_file` is used for Logos**:
+  - `upload_image_file(file_path=..., background_color=(0, 0, 0))` uses `Image.Resampling.LANCZOS` (`resize_image`), which produces smooth anti-aliased edge pixels on the `32x32` LED matrix, and sends DIY image packets (`type 0`) supported by `32x32` firmware `4.12` (whereas `show_image_file` sends `type 2` static image packets that `32x32` firmware `4.12` rejects with notification `0500020000`).
   - Avoid 1-bit thresholding or `Image.Resampling.NEAREST` when rendering curved logos, as hard stair-stepping distorts circular arcs on a `32x32` grid.
 - **Why `ImageMode.EnableDIY` + `GraffitiModule.set_pixels` is used for the Countdown**:
-  - Full-image PNG uploads (`ImageModule.show_image`) trigger the device's built-in upload/link splash icon (`><`) whenever a multi-chunk image transfer starts.
+  - Full-image uploads (`ImageModule.upload_image_file`) trigger the device's built-in upload/link splash icon (`><`) whenever a multi-chunk image transfer starts.
   - Entering `ImageMode.EnableDIY` once (`await client.image.set_mode(ImageMode.EnableDIY)`) and sending direct pixel packets (`await client.graffiti.set_pixels(color, chunk)`) in batches of `MAX_PIXEL_LIST_LENGTH = 255` updates individual LEDs in place (~12ms per packet) with **zero upload icon flicker**.
   - Pacing against `time.monotonic()` (`start + ((cleared + 1) / total_pixels) * total_seconds`) prevents cumulative BLE write latency from making the countdown run slow.
