@@ -108,6 +108,6 @@ If the user wants to use the web frontend at `http://127.0.0.1:8080`:
 ## Quality Standards & Guardrails
 
 - **Pure Black Backgrounds**: Always composite or pad images onto `(0, 0, 0)` so unlit LEDs remain completely off on the physical matrix.
-- **Anti-Aliased Downscaling**: Always use `ImageModule.show_image_file(..., background_color=(0, 0, 0))` (which uses `Image.Resampling.LANCZOS`) for logos and photos rather than 1-bit or nearest-neighbor downscaling.
-- **No Upload Icon During Countdowns**: Never use full-frame PNG uploads (`show_image`) inside a countdown loop; always use `ImageMode.EnableDIY` + `GraffitiModule.set_pixels` in batches of at most `255` pixels (`MAX_PIXEL_LIST_LENGTH`).
+- **Anti-Aliased Downscaling**: Always use `ImageMode.EnableDIY` + `ImageModule.upload_image_file(..., background_color=(0, 0, 0))` (which uses `Image.Resampling.LANCZOS`) for logos and photos rather than 1-bit or nearest-neighbor downscaling, or `show_image_file` (which sends static image type `0x02` that `32x32` firmware `4.12` rejects with `0500020000`).
+- **No Upload Icon During Countdowns**: Never use full-frame image uploads (`upload_image_file`) inside a countdown loop; always use `ImageMode.EnableDIY` + `GraffitiModule.set_pixels` in batches of at most `255` pixels (`MAX_PIXEL_LIST_LENGTH`).
 - **Detailed Protocol Reference**: See [`references/api_and_protocol.md`](./references/api_and_protocol.md) for HTTP payload schemas and BLE protocol details.

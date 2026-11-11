@@ -12,7 +12,8 @@ A lightweight, zero-framework-dependency Python web app for controlling your iDo
    - **Google G** (`library/google-g.png`)
    - **Red Heart** (`library/red-heart.png`)
    - **Thumbs Up** (`library/thumbs-up.png`)
-   - One-click display using `client.image.show_image_file()` (`LANCZOS` anti-aliased scaling on a black background), plus browser upload to add more pictures to the library.
+   - One-click display using `client.image.set_mode(ImageMode.EnableDIY)` + `client.image.upload_image_file()` (`LANCZOS` anti-aliased scaling on a black background), plus browser upload to add more pictures to the library.
+   - **Multi-Picture Cycling**: Select multiple pictures from the library (showing cycle order `#1`, `#2`, ...) and cycle through them automatically with a configurable delay in seconds.
 
 2. **Full-Screen LED Pixel Countdown Timer**
    - Enters DIY mode once (`ImageMode.EnableDIY`) and lights up all pixels (`1,024` pixels on `32x32`) in your chosen color.
